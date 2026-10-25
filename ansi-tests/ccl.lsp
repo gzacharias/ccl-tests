@@ -2792,3 +2792,23 @@
                                 (list (if d :yes :no) (not d)))))))
       (list (funcall fn t) (funcall fn nil)))
   ((:yes nil) (:yes nil)))
+
+;;; A symbol defined by a library opened with OPEN-SHARED-LIBRARY should resolve to
+;;; that library, even if a library loaded earlier exports the same name.  CL+SSL
+;;; explicitly loads an SSL library (defaultly libssl.48.dylib) and expects it to be
+;;; used, but opening Cocoa (as the Objective-C bridge does) also loads other SSL
+;;; libraries as dependencies and clashes on symbols such as SSL_CTX_new.
+;;; (GitHub issue #686)
+#+darwin-target
+(deftest ccl.issue#686
+    (ccl:open-shared-library "/System/Library/Frameworks/Cocoa.framework/Cocoa")
+    (flet ((dlopen (path mode)
+             (ccl::with-cstrs ((p path)) (#_dlopen p mode))))
+      (let ((path "/usr/lib/libssl.48.dylib"))
+        (ccl:open-shared-library path)
+        (let ((entry (ccl::foreign-symbol-entry "SSL_CTX_new"))
+              (expected (ccl::with-cstrs ((name "SSL_CTX_new"))
+                          (#_dlsym (dlopen path (logior #$RTLD_NOLOAD #$RTLD_LAZY)) name))))
+          (eql (if (ccl:macptrp entry) (ccl:%ptr-to-int entry) entry)
+               (ccl:%ptr-to-int expected)))))
+  t)
