@@ -1,0 +1,58 @@
+# One-off probe: does issue #686 (CL+SSL symbol clash after opening Cocoa) happen on
+# Apple Silicon too?  Runs the CCL tests, including ccl.issue#686, against the released
+# 1.14 binaries on an Intel mac (control) and an Apple Silicon mac.
+name: Issue 686 on Intel and Apple Silicon
+
+on:
+  push:
+    branches: [ci-openssl-686]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            tarball: ccl-1.14-darwinx86.tar.gz
+            kernel: dx86cl64
+          - runner: macos-latest
+            tarball: ccl-1.14-darwinarm64.tar.gz
+            kernel: darm64cl
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ccl-tests
+
+      - name: Install released ccl 1.14
+        run: |
+          curl -sSfL -O https://github.com/Clozure/ccl/releases/download/v1.14/${{ matrix.tarball }}
+          tar -xzf ${{ matrix.tarball }}
+          uname -m
+          ccl/${{ matrix.kernel }} -n -b -e '(progn (format t "~&~a~%" (lisp-implementation-version)) (quit))'
+
+      - name: Run the CCL tests (no ANSI, no stress)
+        working-directory: ccl-tests
+        run: |
+          ../ccl/${{ matrix.kernel }} --no-init --batch -l load.lisp \
+            -e '(progn (format t "~&FAILED-TESTS: ~s~%" (run-tests :ansi nil :stress nil)) (quit))' \
+            > ../tests.log 2>&1 || true
+          tail -30 ../tests.log
+          grep -q 'FAILED-TESTS:' ../tests.log
+          if grep 'FAILED-TESTS:' ../tests.log | grep -qi 'ISSUE#686'; then
+            echo "::warning::${{ matrix.runner }}: ccl.issue#686 FAILED (bug present)"
+          else
+            echo "::notice::${{ matrix.runner }}: ccl.issue#686 passed (bug absent)"
+          fi
+
+      - name: Keep the log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-${{ matrix.runner }}
+          path: tests.log
