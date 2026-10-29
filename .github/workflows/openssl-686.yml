@@ -1,6 +1,7 @@
 # One-off probe: does issue #686 (cl+ssl crashes after objc-support is loaded) happen on
 # Apple Silicon too?  Runs the crash repro from the issue against the released 1.14 binaries
-# on an Intel mac (control) and an Apple Silicon mac, with and without objc-support.
+# on an Intel mac (control) and an Apple Silicon mac, with and without objc-support, and runs
+# the ccl.issue#686 test, which checks the cause (SSL_CTX_new resolving to the wrong library).
 name: Issue 686 on Intel and Apple Silicon
 
 on:
@@ -27,11 +28,17 @@ jobs:
     env:
       CCL: ${{ github.workspace }}/ccl/${{ matrix.kernel }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ccl-tests
+
       - name: Install released ccl 1.14 and Quicklisp
         run: |
+          sw_vers | tee system.log
+          uname -m | tee -a system.log
           curl -sSfL -O https://github.com/Clozure/ccl/releases/download/v1.14/${{ matrix.tarball }}
           tar -xzf ${{ matrix.tarball }}
-          uname -m
+          $CCL -n -b -e '(progn (format t "~&~a~%" (lisp-implementation-version)) (quit))' | tee -a system.log
           curl -sSfL -O https://beta.quicklisp.org/quicklisp.lisp
           $CCL -n -b -l quicklisp.lisp -e '(quicklisp-quickstart:install)' -e '(quit)'
           # Download and compile cl+ssl once, so the runs below only load it.
@@ -45,23 +52,39 @@ jobs:
           cat plain.log
           grep -q CL+SSL-INIT-OK plain.log
 
-      # In batch mode the crash kills ccl with SIGSEGV (exit 139) without printing anything.
+      # Not in batch mode, so a crash lands in the kernel debugger, which reads these commands
+      # from stdin: registers, lisp registers, backtrace, exit.
       - name: cl+ssl after objc-support (the issue 686 repro)
         timeout-minutes: 5
         run: |
           status=0
-          $CCL -n -b -e "(require 'objc-support)" -e '(load "~/quicklisp/setup.lisp")' -e '(ql:quickload :cl+ssl)' \
-               -e '(cl+ssl:ensure-initialized)' -e '(format t "~&CL+SSL-INIT-OK~%")' -e '(quit)' \
-               < /dev/null > objc.log 2>&1 || status=$?
+          printf 'R\nL\nB\nX\n' | \
+            $CCL -n -e "(require 'objc-support)" -e '(load "~/quicklisp/setup.lisp")' -e '(ql:quickload :cl+ssl)' \
+                 -e '(cl+ssl:ensure-initialized)' -e '(format t "~&CL+SSL-INIT-OK~%")' -e '(quit)' \
+                 > objc.log 2>&1 || status=$?
           cat objc.log
           echo "exit status $status"
           if grep -q CL+SSL-INIT-OK objc.log; then
             echo "::notice::${{ matrix.runner }}: no crash with objc-support (bug absent)"
-          elif [ $status -eq 139 ]; then
-            echo "::warning::${{ matrix.runner }}: SIGSEGV with objc-support (bug present)"
+          elif grep -q 'kernel debugger\|FATAL' objc.log; then
+            echo "::warning::${{ matrix.runner }}: crashed with objc-support (bug present)"
           else
-            echo "::error::${{ matrix.runner }}: neither finished nor segfaulted (exit $status); see objc.log"
+            echo "::error::${{ matrix.runner }}: neither finished nor crashed (exit $status); see objc.log"
             exit 1
+          fi
+
+      - name: The ccl.issue#686 test
+        working-directory: ccl-tests
+        run: |
+          $CCL --no-init --batch -l load.lisp \
+            -e '(progn (format t "~&FAILED-TESTS: ~s~%" (run-tests :ansi nil :stress nil)) (quit))' \
+            > ../tests.log 2>&1 || true
+          grep -A4 '686' ../tests.log || true
+          grep -q 'FAILED-TESTS:' ../tests.log
+          if grep 'FAILED-TESTS:' ../tests.log | grep -q '686'; then   # rt prints the name as ISSUE\#686
+            echo "::warning::${{ matrix.runner }}: ccl.issue#686 failed (SSL_CTX_new resolves to the wrong library)"
+          else
+            echo "::notice::${{ matrix.runner }}: ccl.issue#686 passed"
           fi
 
       - name: Keep the logs
