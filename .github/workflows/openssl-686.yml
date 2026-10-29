@@ -1,6 +1,6 @@
-# One-off probe: does issue #686 (CL+SSL symbol clash after opening Cocoa) happen on
-# Apple Silicon too?  Runs the CCL tests, including ccl.issue#686, against the released
-# 1.14 binaries on an Intel mac (control) and an Apple Silicon mac.
+# One-off probe: does issue #686 (cl+ssl crashes after objc-support is loaded) happen on
+# Apple Silicon too?  Runs the crash repro from the issue against the released 1.14 binaries
+# on an Intel mac (control) and an Apple Silicon mac, with and without objc-support.
 name: Issue 686 on Intel and Apple Silicon
 
 on:
@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  repro:
     strategy:
       fail-fast: false
       matrix:
@@ -23,36 +23,50 @@ jobs:
             tarball: ccl-1.14-darwinarm64.tar.gz
             kernel: darm64cl
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 20
+    env:
+      CCL: ${{ github.workspace }}/ccl/${{ matrix.kernel }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          path: ccl-tests
-
-      - name: Install released ccl 1.14
+      - name: Install released ccl 1.14 and Quicklisp
         run: |
           curl -sSfL -O https://github.com/Clozure/ccl/releases/download/v1.14/${{ matrix.tarball }}
           tar -xzf ${{ matrix.tarball }}
           uname -m
-          ccl/${{ matrix.kernel }} -n -b -e '(progn (format t "~&~a~%" (lisp-implementation-version)) (quit))'
+          curl -sSfL -O https://beta.quicklisp.org/quicklisp.lisp
+          $CCL -n -b -l quicklisp.lisp -e '(quicklisp-quickstart:install)' -e '(quit)'
+          # Download and compile cl+ssl once, so the runs below only load it.
+          $CCL -n -b -e '(load "~/quicklisp/setup.lisp")' -e '(ql:quickload :cl+ssl)' -e '(quit)'
 
-      - name: Run the CCL tests (no ANSI, no stress)
-        working-directory: ccl-tests
+      - name: cl+ssl without objc-support (control)
         run: |
-          ../ccl/${{ matrix.kernel }} --no-init --batch -l load.lisp \
-            -e '(progn (format t "~&FAILED-TESTS: ~s~%" (run-tests :ansi nil :stress nil)) (quit))' \
-            > ../tests.log 2>&1 || true
-          tail -30 ../tests.log
-          grep -q 'FAILED-TESTS:' ../tests.log
-          if grep 'FAILED-TESTS:' ../tests.log | grep -q '686'; then   # rt prints the name as ISSUE\#686
-            echo "::warning::${{ matrix.runner }}: ccl.issue#686 FAILED (bug present)"
+          $CCL -n -b -e '(load "~/quicklisp/setup.lisp")' -e '(ql:quickload :cl+ssl)' \
+               -e '(cl+ssl:ensure-initialized)' -e '(format t "~&CL+SSL-INIT-OK~%")' -e '(quit)' \
+               < /dev/null > plain.log 2>&1 || echo "exit status $?"
+          cat plain.log
+          grep -q CL+SSL-INIT-OK plain.log
+
+      # In batch mode the crash kills ccl with SIGSEGV (exit 139) without printing anything.
+      - name: cl+ssl after objc-support (the issue 686 repro)
+        timeout-minutes: 5
+        run: |
+          status=0
+          $CCL -n -b -e "(require 'objc-support)" -e '(load "~/quicklisp/setup.lisp")' -e '(ql:quickload :cl+ssl)' \
+               -e '(cl+ssl:ensure-initialized)' -e '(format t "~&CL+SSL-INIT-OK~%")' -e '(quit)' \
+               < /dev/null > objc.log 2>&1 || status=$?
+          cat objc.log
+          echo "exit status $status"
+          if grep -q CL+SSL-INIT-OK objc.log; then
+            echo "::notice::${{ matrix.runner }}: no crash with objc-support (bug absent)"
+          elif [ $status -eq 139 ]; then
+            echo "::warning::${{ matrix.runner }}: SIGSEGV with objc-support (bug present)"
           else
-            echo "::notice::${{ matrix.runner }}: ccl.issue#686 passed (bug absent)"
+            echo "::error::${{ matrix.runner }}: neither finished nor segfaulted (exit $status); see objc.log"
+            exit 1
           fi
 
-      - name: Keep the log
+      - name: Keep the logs
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: tests-${{ matrix.runner }}
-          path: tests.log
+          name: logs-${{ matrix.runner }}
+          path: "*.log"
