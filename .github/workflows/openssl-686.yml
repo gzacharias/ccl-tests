@@ -44,7 +44,7 @@ jobs:
             > ../tests.log 2>&1 || true
           tail -30 ../tests.log
           grep -q 'FAILED-TESTS:' ../tests.log
-          if grep 'FAILED-TESTS:' ../tests.log | grep -qi 'ISSUE#686'; then
+          if grep 'FAILED-TESTS:' ../tests.log | grep -q '686'; then   # rt prints the name as ISSUE\#686
             echo "::warning::${{ matrix.runner }}: ccl.issue#686 FAILED (bug present)"
           else
             echo "::notice::${{ matrix.runner }}: ccl.issue#686 passed (bug absent)"
